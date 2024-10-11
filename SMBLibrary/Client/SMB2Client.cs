@@ -227,19 +227,19 @@ namespace SMBLibrary.Client
             return false;
         }
 
-        public NTStatus Login(string domainName, string userName, string password)
+        public NTStatus Login(string domainName, string userName, string password, ulong previousSessionId)
         {
-            return Login(domainName, userName, password, AuthenticationMethod.NTLMv2);
+            return Login(domainName, userName, password, previousSessionId, AuthenticationMethod.NTLMv2);
         }
 
-        public NTStatus Login(string domainName, string userName, string password, AuthenticationMethod authenticationMethod)
+        public NTStatus Login(string domainName, string userName, string password, ulong previousSessionId, AuthenticationMethod authenticationMethod)
         {
             string spn = string.Format("cifs/{0}", m_serverName);
             NTLMAuthenticationClient authenticationClient = new NTLMAuthenticationClient(domainName, userName, password, spn, authenticationMethod);
-            return Login(authenticationClient);
+            return Login(previousSessionId, authenticationClient);
         }
 
-        public NTStatus Login(IAuthenticationClient authenticationClient)
+        public NTStatus Login(ulong previousSessionId, IAuthenticationClient authenticationClient)
         {
             if (!m_isConnected)
             {
@@ -254,6 +254,7 @@ namespace SMBLibrary.Client
 
             SessionSetupRequest request = new SessionSetupRequest();
             request.SecurityMode = SecurityMode.SigningEnabled;
+            request.PreviousSessionId = previousSessionId;
             request.SecurityBuffer = negotiateMessage;
             TrySendCommand(request);
             SMB2Command response = WaitForCommand(request.MessageID);
@@ -268,6 +269,7 @@ namespace SMBLibrary.Client
                 m_sessionID = response.Header.SessionID;
                 request = new SessionSetupRequest();
                 request.SecurityMode = SecurityMode.SigningEnabled;
+                request.PreviousSessionId = previousSessionId;
                 request.SecurityBuffer = authenticateMessage;
                 TrySendCommand(request);
                 response = WaitForCommand(request.MessageID);
@@ -683,6 +685,14 @@ namespace SMBLibrary.Client
                 preAuthIntegrityCapabilities,
                 encryptionCapabilities
             };
+        }
+
+        public ulong SessionID
+        {
+            get
+            {
+                return m_sessionID;
+            }
         }
 
         public uint MaxTransactSize
