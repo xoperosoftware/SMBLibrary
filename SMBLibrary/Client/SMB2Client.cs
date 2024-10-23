@@ -302,6 +302,10 @@ namespace SMBLibrary.Client
                 }
                 return response.Header.Status;
             }
+            else if(response.Header.Status == NTStatus.STATUS_LOGON_FAILURE)
+            {
+                return NTStatus.STATUS_LOGON_FAILURE;
+            }
             else
             {
                 return NTStatus.STATUS_INVALID_SMB;
