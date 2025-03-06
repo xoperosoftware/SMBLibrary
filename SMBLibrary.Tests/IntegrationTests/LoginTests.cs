@@ -45,7 +45,7 @@ namespace SMBLibrary.Tests.IntegrationTests
             client.Connect(IPAddress.Loopback, SMBTransportType.DirectTCPTransport, m_serverPort, 5000);
 
             // Act
-            NTStatus status = client.Login("", "John", "password");
+            NTStatus status = client.Login("", "John", "password", 0);
 
             // Assert
             Assert.AreEqual(NTStatus.STATUS_SUCCESS, status);
@@ -59,13 +59,13 @@ namespace SMBLibrary.Tests.IntegrationTests
             client.Connect(IPAddress.Loopback, SMBTransportType.DirectTCPTransport, m_serverPort, 5000);
 
             // Act
-            NTStatus status = client.Login("", "John", "password");
+            NTStatus status = client.Login("", "John", "password", 0);
             Assert.AreEqual(NTStatus.STATUS_SUCCESS, status);
             status = client.Logoff();
             Assert.AreEqual(NTStatus.STATUS_SUCCESS, status);
             client.Disconnect();
             client.Connect(IPAddress.Loopback, SMBTransportType.DirectTCPTransport, m_serverPort, 5000);
-            status = client.Login("", "John", "password");
+            status = client.Login("", "John", "password", 0);
 
             // Assert
             Assert.AreEqual(NTStatus.STATUS_SUCCESS, status);
@@ -79,7 +79,7 @@ namespace SMBLibrary.Tests.IntegrationTests
             client.Connect(IPAddress.Loopback, SMBTransportType.DirectTCPTransport, m_serverPort, 5000);
 
             // Act
-            NTStatus status = client.Login("", "John", "Password");
+            NTStatus status = client.Login("", "John", "Password", 0);
 
             // Assert
             Assert.AreEqual(NTStatus.STATUS_LOGON_FAILURE, status);
