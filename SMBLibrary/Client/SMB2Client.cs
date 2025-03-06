@@ -28,6 +28,8 @@ namespace SMBLibrary.Client
         private static readonly ushort DesiredCredits = 16;
         public static readonly int DefaultResponseTimeoutInMilliseconds = 5000;
 
+        private readonly ILogger _logger;
+        
         private string m_serverName;
         private SMBTransportType m_transport;
         private bool m_isConnected;
@@ -59,8 +61,9 @@ namespace SMBLibrary.Client
         private byte[] m_preauthIntegrityHashValue; // SMB 3.1.1
         private ushort m_availableCredits = 1;
 
-        public SMB2Client()
+        public SMB2Client(ILogger logger = null)
         {
+            _logger = logger;
         }
 
         /// <param name="serverName">
@@ -308,6 +311,12 @@ namespace SMBLibrary.Client
             }
             else
             {
+                _logger?.LogError($"Error occured during login. Response details: \n" +
+                                  $"Status: {response.Header.Status}\n" +
+                                  $"Response type: {response.GetType()}\n" +
+                                  $"Credits: {response.Header.Credits}\n" +
+                                  $"Credits charge: {response.Header.CreditCharge}");
+
                 return NTStatus.STATUS_INVALID_SMB;
             }
         }
