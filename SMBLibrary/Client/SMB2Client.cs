@@ -317,6 +317,9 @@ namespace SMBLibrary.Client
                                   $"Credits: {response.Header.Credits}\n" +
                                   $"Credits charge: {response.Header.CreditCharge}");
 
+                if (response.Header.Status == NTStatus.STATUS_REQUEST_NOT_ACCEPTED)
+                    return NTStatus.STATUS_REQUEST_NOT_ACCEPTED;
+
                 return NTStatus.STATUS_INVALID_SMB;
             }
         }
