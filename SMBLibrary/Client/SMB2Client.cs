@@ -278,6 +278,12 @@ namespace SMBLibrary.Client
                 response = WaitForCommand(request.MessageID);
             }
 
+            if (response == null)
+            {
+                _logger.LogError("Login error: returned response is null");
+                return NTStatus.STATUS_INVALID_SMB;
+            }
+            
             if (response is SessionSetupResponse)
             {
                 m_isLoggedIn = (response.Header.Status == NTStatus.STATUS_SUCCESS);
