@@ -510,3 +510,66 @@ Revision History:
         Client: Improve client response time when server disconnects or return invalid data.
         Client: Fix possible NullReferenceException when disconnection occur during directory enumeration.
         Client: SMB1FileStore, SMB2FileStore: Return STATUS_IO_TIMEOUT instead of STATUS_INVALID_SMB when server does not reply and there is no protocol violation.
+
+1.5.4 - Server: SMB2: QueryInfoHelper: Correctly handle UnsupportedInformationLevelException and NotImplementedException
+        Client: Update IsConnected on EndReceive socket exception.
+        Client: NTLMAuthenticationClient: Set MechanismListMIC when applicable.
+        SMB2Client: Correctly handle signing when authenticated as guest.
+        SMB2Client: Updated encryption and signing logic to support SMB 3.0.2.
+        SMB2Client: Added support for single-stage and triple-stage session setup.
+        SMB2: CreateResponse: Bugfix: Write CreateContexts offset and Length.
+        SMB2: CreateContext: Bugfix: Read and Write name as ANSI instead of UTF16.
+        SMB2: CreateContext: Bugfix: Correct Name and Data offset write location.
+        SMB2: CreateContext: Bugfix: Write DataLength.
+        SMB2: NegotiateContext: Fix parsing bugs.
+        SMB2: NegotiateRequest: Parse NegotiateContextList (SMB 3.1.1)
+        SMB2: NegotiateRequest: Do not pad request if NegotiateContextList is empty.
+        SMB2: NegotiateResponse: Bugfix: NegotiateContext was not read from the correct position for non-zero offset.
+        ACL: Bugfix: Use AceSize when parsing ACL.
+
+1.5.5 - SMB1Client: Fix UserID being ignored when extended security is set to false.
+        SMB2Client: Always sign outgoing messages when dialect is 3.1.1
+        SMB2Client: Correctly report login error status instead of STATUS_INVALID_SMB.
+        SMB2Client: Enabled SMB 3.0.2 support by default.
+        SMB2Client: Added constructor argument to enable SMB 3.1.1
+        SMB2Client: Throw exception if attempting to read or write more data than allowed for the connection.
+        SMB2Client: Correctly handle the uncommon case of a server not supporting large MTU over applicable connection.
+        Client: Improved handling of invalid FILETIME.
+        Client: Disconnect: Ensure ongoing reading operation is complete before closing the socket.
+        Client: Move responseTimeoutInMilliseconds from Connect method to constructor.
+        Client: Added virtual GetNetBiosServerName method.
+        Client: Added Echo command support.
+        SMB2: Added FileAttributeTagInformation support.
+        Server: SMB2: NegotiateResponse: Corrected CommandLength calculation.
+
+1.5.6 - Client: NTLM: Set NTLMSSP_REQUEST_TARGET bit in negotiate message.
+        SMB1Client: Correctly report login error status instead of STATUS_INVALID_SMB.
+        SMB1Client: Compute session key when extended security is set to false.
+        SMB2Client: Simplified enabling SMB 3.1.1
+        SMB2Client: Implemented SetSecurityInformation.
+        NTLM: NegotiateFlags: Renamed TargetNameSupplied to TargetNameNegotiated.
+        NTLM: NegotiateFlags: Renamed RequestLMSessionKey to RequestNonNTSessionKey.
+        DFS: Implemented ResponseGetDfsReferral.
+        DFS: Implemented RequestGetDfsReferralEx.
+        SMB1: Implemented SMB_COM_QUERY_INFORMATION_DISK request and response.
+        Server: SMB1: Add support for SMB_COM_QUERY_INFORMATION_DISK used by Windows 98.
+        Server: SessionSetupHelper: Correctly handle NTLM v1 non-extended-session-security with LmChallengeResponse set to 0 bytes.
+        NTFileStore: SecurityDescriptor: Set SelfRelative bit when applicable.
+        NTFileStore: FileSystemAttributes: Fixed typo, Renamed CasePreservedNamed to CasePreservedNames.
+        NTFileStore: FileAccessMask: Added missing FILE_DELETE_CHILD.
+        NTFileStore: FileSystemAttributes: Added missing enum values.
+        NTFileStore: DeviceCharacteristics: Added additional enum values.
+
+1.5.7 - Client: NTLMAuthenticationClient: Added virtual CreateNegotiateMessage method.
+        Client: NTLMAuthenticationHelper: Added GetNegotiateMessage overload.
+        Client: NTLMAuthenticationHelper: GetNegotiateMessage: Added ability to set NTLMSSP_NEGOTIATE_SEAL.
+        Client: NTLMAuthenticationClient: Bugfix: DomainName and Workstation must be empty when Version is set.
+        RC4: Added Encrypt/Decrypt overload accepting RC4KeyState to allow encrypting streams.
+        NTLMCryptography: ComputeMechListMIC: Update seqNum type to uint.
+        NTLMCryptography: Extracted ComputeMessageHash method.
+        NTLMCryptography: Extracted ComputeMessageSignature.
+        NTLMCryptography: Added VerifyMessageHash method.
+        NTLMCryptography: Marked ComputeSignKey and ComputeSealKey as public.
+        IndependentNTLMAuthenticationProvider: Extracted virtual CreateChallengeMessage method.
+        IndependentNTLMAuthenticationProvider: Extract GetServerName method.
+        Client: Fix rare racing condition when Disconnect is called before response has been received.

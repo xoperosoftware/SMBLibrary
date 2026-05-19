@@ -1,13 +1,11 @@
-/* Copyright (C) 2016-2020 Tal Aloni <tal.aloni.il@gmail.com>. All rights reserved.
+/* Copyright (C) 2016-2025 Tal Aloni <tal.aloni.il@gmail.com>. All rights reserved.
  * 
  * You can redistribute this program and/or modify it under the terms of
  * the GNU Lesser Public License as published by the Free Software Foundation,
  * either version 3 of the License, or (at your option) any later version.
  */
-using System;
 using System.Collections.Generic;
 using System.Threading;
-using System.Text;
 
 namespace Utilities
 {
@@ -19,6 +17,11 @@ namespace Utilities
 
         public void Enqueue(T item)
         {
+            if (m_stopping)
+            {
+                return;
+            }
+
             lock (m_queue)
             {
                 m_queue.Enqueue(item);
@@ -32,10 +35,11 @@ namespace Utilities
 
         public void Enqueue(List<T> items)
         {
-            if (items.Count == 0)
+            if (m_stopping || items.Count == 0)
             {
                 return;
             }
+
             lock (m_queue)
             {
                 foreach (T item in items)
@@ -57,8 +61,12 @@ namespace Utilities
             {
                 while (m_queue.Count == 0)
                 {
-                    Monitor.Wait(m_queue);
-                    if (m_stopping)
+                    if (!m_stopping)
+                    {
+                        Monitor.Wait(m_queue);
+                    }
+
+                    if (m_stopping && m_queue.Count == 0)
                     {
                         item = default(T);
                         return false;
@@ -77,6 +85,15 @@ namespace Utilities
             {
                 m_stopping = true;
                 Monitor.PulseAll(m_queue);
+            }
+        }
+
+        public void Abort()
+        {
+            lock (m_queue)
+            {
+                m_queue.Clear();
+                Stop();
             }
         }
 

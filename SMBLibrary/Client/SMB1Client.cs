@@ -1,4 +1,4 @@
-/* Copyright (C) 2014-2024 Tal Aloni <tal.aloni.il@gmail.com>. All rights reserved.
+/* Copyright (C) 2014-2025 Tal Aloni <tal.aloni.il@gmail.com>. All rights reserved.
  * 
  * You can redistribute this program and/or modify it under the terms of
  * the GNU Lesser Public License as published by the Free Software Foundation,
@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Threading;
 using SMBLibrary.Authentication.NTLM;
 using SMBLibrary.Client.Authentication;
@@ -57,8 +58,13 @@ namespace SMBLibrary.Client
         private byte[] m_securityBlob;
         private byte[] m_sessionKey;
 
-        public SMB1Client()
+        public SMB1Client() : this(DefaultResponseTimeoutInMilliseconds)
         {
+        }
+
+        public SMB1Client(int responseTimeoutInMilliseconds)
+        {
+            m_responseTimeoutInMilliseconds = responseTimeoutInMilliseconds;
         }
 
         public bool Connect(string serverName, SMBTransportType transport)
@@ -79,22 +85,16 @@ namespace SMBLibrary.Client
 
         public bool Connect(IPAddress serverAddress, SMBTransportType transport, bool forceExtendedSecurity)
         {
-            return Connect(serverAddress, transport, forceExtendedSecurity, DefaultResponseTimeoutInMilliseconds);
-        }
-
-        public bool Connect(IPAddress serverAddress, SMBTransportType transport, bool forceExtendedSecurity, int responseTimeoutInMilliseconds)
-        {
             int port = (transport == SMBTransportType.DirectTCPTransport ? DirectTCPPort : NetBiosOverTCPPort);
-            return Connect(serverAddress, transport, port, forceExtendedSecurity, responseTimeoutInMilliseconds);
+            return Connect(serverAddress, transport, port, forceExtendedSecurity);
         }
 
-        protected internal bool Connect(IPAddress serverAddress, SMBTransportType transport, int port, bool forceExtendedSecurity, int responseTimeoutInMilliseconds)
+        protected internal bool Connect(IPAddress serverAddress, SMBTransportType transport, int port, bool forceExtendedSecurity)
         {
             m_transport = transport;
             if (!m_isConnected)
             {
                 m_forceExtendedSecurity = forceExtendedSecurity;
-                m_responseTimeoutInMilliseconds = responseTimeoutInMilliseconds;
                 if (!ConnectSocket(serverAddress, port))
                 {
                     return false;
@@ -116,8 +116,7 @@ namespace SMBLibrary.Client
                             return false;
                         }
 
-                        NameServiceClient nameServiceClient = new NameServiceClient(serverAddress);
-                        string serverName = nameServiceClient.GetServerName();
+                        string serverName = GetNetBiosServerName(serverAddress);
                         if (serverName == null)
                         {
                             return false;
@@ -147,6 +146,12 @@ namespace SMBLibrary.Client
             return m_isConnected;
         }
 
+        protected virtual string GetNetBiosServerName(IPAddress serverAddress)
+        {
+            NameServiceClient nameServiceClient = new NameServiceClient(serverAddress);
+            return nameServiceClient.GetServerName();
+        }
+
         private bool ConnectSocket(IPAddress serverAddress, int port)
         {
             m_clientSocket = new Socket(serverAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
@@ -170,10 +175,10 @@ namespace SMBLibrary.Client
         {
             if (m_isConnected)
             {
-                m_clientSocket.Disconnect(false);
-                m_clientSocket.Close();
                 lock (m_connectionState.ReceiveBuffer)
                 {
+                    m_clientSocket.Disconnect(false);
+                    m_clientSocket.Close();
                     m_connectionState.ReceiveBuffer.Dispose();
                 }
                 m_isConnected = false;
@@ -267,6 +272,7 @@ namespace SMBLibrary.Client
                 request.PrimaryDomain = domainName;
                 byte[] clientChallenge = new byte[8];
                 new Random().NextBytes(clientChallenge);
+                byte[] proofStr = null;
                 if (authenticationMethod == AuthenticationMethod.NTLMv1)
                 {
                     request.OEMPassword = NTLMCryptography.ComputeLMv1Response(m_serverChallenge, password);
@@ -284,9 +290,9 @@ namespace SMBLibrary.Client
                     // https://msdn.microsoft.com/en-us/library/cc236700.aspx
                     request.OEMPassword = NTLMCryptography.ComputeLMv2Response(m_serverChallenge, clientChallenge, password, userName, domainName);
                     NTLMv2ClientChallenge clientChallengeStructure = new NTLMv2ClientChallenge(DateTime.UtcNow, clientChallenge, AVPairUtils.GetAVPairSequence(domainName, Environment.MachineName));
-                    byte[] temp = clientChallengeStructure.GetBytesPadded();
-                    byte[] proofStr = NTLMCryptography.ComputeNTLMv2Proof(m_serverChallenge, temp, password, userName, domainName);
-                    request.UnicodePassword = ByteUtils.Concatenate(proofStr, temp);
+                    byte[] clientChallengeStructurePadded = clientChallengeStructure.GetBytesPadded();
+                    proofStr = NTLMCryptography.ComputeNTLMv2Proof(m_serverChallenge, clientChallengeStructurePadded, password, userName, domainName);
+                    request.UnicodePassword = ByteUtils.Concatenate(proofStr, clientChallengeStructurePadded);
                 }
 
                 TrySendMessage(request);
@@ -295,6 +301,13 @@ namespace SMBLibrary.Client
                 if (reply != null)
                 {
                     m_isLoggedIn = (reply.Header.Status == NTStatus.STATUS_SUCCESS);
+                    if (m_isLoggedIn)
+                    {
+                        m_userID = reply.Header.UID;
+                        m_sessionKey = (authenticationMethod == AuthenticationMethod.NTLMv1) ?
+                            new MD4().GetByteHashFromBytes(NTLMCryptography.NTOWFv1(password)) :
+                            new HMACMD5(NTLMCryptography.NTOWFv2(password, userName, domainName)).ComputeHash(proofStr);
+                    }
                     return reply.Header.Status;
                 }
                 return NTStatus.STATUS_INVALID_SMB;
@@ -336,7 +349,11 @@ namespace SMBLibrary.Client
                     reply = WaitForMessage(CommandName.SMB_COM_SESSION_SETUP_ANDX);
                 }
 
-                if (reply != null && reply.Commands[0] is SessionSetupAndXResponseExtended)
+                if (reply != null && reply.Commands[0] is ErrorResponse)
+                {
+                    return reply.Header.Status;
+                }
+                else if (reply != null && reply.Commands[0] is SessionSetupAndXResponseExtended)
                 {
                     m_isLoggedIn = (reply.Header.Status == NTStatus.STATUS_SUCCESS);
                     if (m_isLoggedIn)
@@ -422,6 +439,22 @@ namespace SMBLibrary.Client
             return null;
         }
 
+        public NTStatus Echo()
+        {
+            EchoRequest request = new EchoRequest();
+            request.EchoCount = 1;
+            TrySendMessage(request);
+            SMB1Message reply = WaitForMessage(CommandName.SMB_COM_ECHO);
+            if (reply != null)
+            {
+                return reply.Header.Status;
+            }
+            else
+            {
+                return NTStatus.STATUS_INVALID_SMB;
+            }
+        }
+
         private void OnClientSocketReceive(IAsyncResult ar)
         {
             ConnectionState state = (ConnectionState)ar.AsyncState;
@@ -460,7 +493,7 @@ namespace SMBLibrary.Client
                     m_isConnected = false;
                     state.ReceiveBuffer.Dispose();
                 }
-                else
+                else if (clientSocket.Connected)
                 {
                     NBTConnectionReceiveBuffer buffer = state.ReceiveBuffer;
                     buffer.SetNumberOfBytesReceived(numberOfBytesReceived);

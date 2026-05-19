@@ -1,4 +1,4 @@
-/* Copyright (C) 2017-2024 Tal Aloni <tal.aloni.il@gmail.com>. All rights reserved.
+/* Copyright (C) 2017-2026 Tal Aloni <tal.aloni.il@gmail.com>. All rights reserved.
  * 
  * You can redistribute this program and/or modify it under the terms of
  * the GNU Lesser Public License as published by the Free Software Foundation,
@@ -37,6 +37,7 @@ namespace SMBLibrary.Client
         private Socket m_clientSocket;
         private ConnectionState m_connectionState;
         private int m_responseTimeoutInMilliseconds;
+        private bool m_enableSMB311Support = false;
 
         private object m_incomingQueueLock = new object();
         private List<SMB2Command> m_incomingQueue = new List<SMB2Command>();
@@ -60,9 +61,27 @@ namespace SMBLibrary.Client
         private byte[] m_sessionKey;
         private byte[] m_preauthIntegrityHashValue; // SMB 3.1.1
         private ushort m_availableCredits = 1;
+        private bool m_connectionSupportsMultiCredit = false;
 
-        public SMB2Client(ILogger logger = null)
+        public SMB2Client(ILogger logger = null) : this(DefaultResponseTimeoutInMilliseconds)
         {
+            _logger = logger;
+        }
+
+        public SMB2Client(int responseTimeoutInMilliseconds, ILogger logger = null) : this(responseTimeoutInMilliseconds, false)
+        {
+            _logger = logger;
+        }
+
+        public SMB2Client(bool enableSMB311Support, ILogger logger = null) : this(DefaultResponseTimeoutInMilliseconds, enableSMB311Support)
+        {
+            _logger = logger;
+        }
+
+        public SMB2Client(int responseTimeoutInMilliseconds, bool enableSMB311Support, ILogger logger = null)
+        {
+            m_responseTimeoutInMilliseconds = responseTimeoutInMilliseconds;
+            m_enableSMB311Support = enableSMB311Support;
             _logger = logger;
         }
 
@@ -72,11 +91,6 @@ namespace SMBLibrary.Client
         /// </param>
         public bool Connect(string serverName, SMBTransportType transport)
         {
-            return Connect(serverName, transport, DefaultResponseTimeoutInMilliseconds);
-        }
-
-        public bool Connect(string serverName, SMBTransportType transport, int responseTimeoutInMilliseconds)
-        {
             m_serverName = serverName;
             IPAddress[] hostAddresses = Dns.GetHostAddresses(serverName);
             if (hostAddresses.Length == 0)
@@ -84,21 +98,16 @@ namespace SMBLibrary.Client
                 throw new Exception(String.Format("Cannot resolve host name {0} to an IP address", serverName));
             }
             IPAddress serverAddress = IPAddressHelper.SelectAddressPreferIPv4(hostAddresses);
-            return Connect(serverAddress, transport, responseTimeoutInMilliseconds);
+            return Connect(serverAddress, transport);
         }
 
         public bool Connect(IPAddress serverAddress, SMBTransportType transport)
         {
-            return Connect(serverAddress, transport, DefaultResponseTimeoutInMilliseconds);
-        }
-
-        public bool Connect(IPAddress serverAddress, SMBTransportType transport, int responseTimeoutInMilliseconds)
-        {
             int port = (transport == SMBTransportType.DirectTCPTransport ? DirectTCPPort : NetBiosOverTCPPort);
-            return Connect(serverAddress, transport, port, responseTimeoutInMilliseconds);
+            return Connect(serverAddress, transport, port);
         }
 
-        protected internal bool Connect(IPAddress serverAddress, SMBTransportType transport, int port, int responseTimeoutInMilliseconds)
+        protected internal bool Connect(IPAddress serverAddress, SMBTransportType transport, int port)
         {
             if (m_serverName == null)
             {
@@ -108,7 +117,6 @@ namespace SMBLibrary.Client
             m_transport = transport;
             if (!m_isConnected)
             {
-                m_responseTimeoutInMilliseconds = responseTimeoutInMilliseconds;
                 if (!ConnectSocket(serverAddress, port))
                 {
                     return false;
@@ -130,8 +138,7 @@ namespace SMBLibrary.Client
                             return false;
                         }
 
-                        NameServiceClient nameServiceClient = new NameServiceClient(serverAddress);
-                        string serverName = nameServiceClient.GetServerName();
+                        string serverName = GetNetBiosServerName(serverAddress);
                         if (serverName == null)
                         {
                             return false;
@@ -161,6 +168,12 @@ namespace SMBLibrary.Client
             return m_isConnected;
         }
 
+        protected virtual string GetNetBiosServerName(IPAddress serverAddress)
+        {
+            NameServiceClient nameServiceClient = new NameServiceClient(serverAddress);
+            return nameServiceClient.GetServerName();
+        }
+
         private bool ConnectSocket(IPAddress serverAddress, int port)
         {
             m_clientSocket = new Socket(serverAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
@@ -184,16 +197,17 @@ namespace SMBLibrary.Client
         {
             if (m_isConnected)
             {
-                m_clientSocket.Disconnect(false);
-                m_clientSocket.Close();
                 lock (m_connectionState.ReceiveBuffer)
                 {
+                    m_clientSocket.Disconnect(false);
+                    m_clientSocket.Close();
                     m_connectionState.ReceiveBuffer.Dispose();
                 }
                 m_isConnected = false;
                 m_messageID = 0;
                 m_sessionID = 0;
                 m_availableCredits = 1;
+                m_connectionSupportsMultiCredit = false;
             }
         }
 
@@ -207,20 +221,23 @@ namespace SMBLibrary.Client
             request.Dialects.Add(SMB2Dialect.SMB202);
             request.Dialects.Add(SMB2Dialect.SMB210);
             request.Dialects.Add(SMB2Dialect.SMB300);
-#if SMB302_CLIENT
             request.Dialects.Add(SMB2Dialect.SMB302);
-#endif
-#if SMB311_CLIENT
-            request.Dialects.Add(SMB2Dialect.SMB311);
-            request.NegotiateContextList = GetNegotiateContextList();
-            m_preauthIntegrityHashValue = new byte[64];
-#endif
+            if (m_enableSMB311Support)
+            {
+                request.Dialects.Add(SMB2Dialect.SMB311);
+                request.NegotiateContextList = GetNegotiateContextList();
+                m_preauthIntegrityHashValue = new byte[64];
+            }
+
             TrySendCommand(request);
             NegotiateResponse response = WaitForCommand(request.MessageID) as NegotiateResponse;
             if (response != null && response.Header.Status == NTStatus.STATUS_SUCCESS)
             {
                 m_dialect = response.DialectRevision;
-                m_signingRequired = (response.SecurityMode & SecurityMode.SigningRequired) > 0;
+                // [MS-SMB2] 3.3.5.7 If Connection.Dialect is "3.1.1" and Session.IsAnonymous and Session.IsGuest
+                // are set to FALSE and the request is not signed or not encrypted, then the server MUST disconnect the connection.
+                m_signingRequired = (response.SecurityMode & SecurityMode.SigningRequired) > 0 ||
+                                    response.DialectRevision == SMB2Dialect.SMB311;
                 m_maxTransactSize = Math.Min(response.MaxTransactSize, ClientMaxTransactSize);
                 m_maxReadSize = Math.Min(response.MaxReadSize, ClientMaxReadSize);
                 m_maxWriteSize = Math.Min(response.MaxWriteSize, ClientMaxWriteSize);
@@ -261,9 +278,9 @@ namespace SMBLibrary.Client
             request.SecurityBuffer = negotiateMessage;
             TrySendCommand(request);
             SMB2Command response = WaitForCommand(request.MessageID);
-            while (response is SessionSetupResponse && response.Header.Status == NTStatus.STATUS_MORE_PROCESSING_REQUIRED)
+            while (response is SessionSetupResponse sessionSetupResponse && response.Header.Status == NTStatus.STATUS_MORE_PROCESSING_REQUIRED)
             {
-                byte[] authenticateMessage = authenticationClient.InitializeSecurityContext(((SessionSetupResponse)response).SecurityBuffer);
+                byte[] authenticateMessage = authenticationClient.InitializeSecurityContext(sessionSetupResponse.SecurityBuffer);
                 if (authenticateMessage == null)
                 {
                     return NTStatus.SEC_E_INVALID_TOKEN;
@@ -284,13 +301,18 @@ namespace SMBLibrary.Client
                 return NTStatus.STATUS_INVALID_SMB;
             }
             
-            if (response is SessionSetupResponse)
+            if (response is ErrorResponse)
+            {
+                return response.Header.Status;
+            }
+            else if (response is SessionSetupResponse finalSessionSetupResponse)
             {
                 m_isLoggedIn = (response.Header.Status == NTStatus.STATUS_SUCCESS);
                 if (m_isLoggedIn)
                 {
+                    m_sessionID = response.Header.SessionID;
                     m_sessionKey = authenticationClient.GetSessionKey();
-                    SessionFlags sessionFlags = ((SessionSetupResponse)response).SessionFlags;
+                    SessionFlags sessionFlags = finalSessionSetupResponse.SessionFlags;
                     if ((sessionFlags & SessionFlags.IsGuest) > 0)
                     {
                         // [MS-SMB2] 3.2.5.3.1 If the SMB2_SESSION_FLAG_IS_GUEST bit is set in the SessionFlags field of the SMB2
@@ -382,9 +404,9 @@ namespace SMBLibrary.Client
             if (response != null)
             {
                 status = response.Header.Status;
-                if (response.Header.Status == NTStatus.STATUS_SUCCESS && response is TreeConnectResponse)
+                if (response.Header.Status == NTStatus.STATUS_SUCCESS && response is TreeConnectResponse treeConnectResponse)
                 {
-                    bool encryptShareData = (((TreeConnectResponse)response).ShareFlags & ShareFlags.EncryptData) > 0;
+                    bool encryptShareData = (treeConnectResponse.ShareFlags & ShareFlags.EncryptData) > 0;
                     return new SMB2FileStore(this, response.Header.TreeID, m_encryptSessionData || encryptShareData);
                 }
             }
@@ -393,6 +415,21 @@ namespace SMBLibrary.Client
                 status = NTStatus.STATUS_INVALID_SMB;
             }
             return null;
+        }
+
+        public NTStatus Echo()
+        {
+            EchoRequest request = new EchoRequest();
+            TrySendCommand(request);
+            SMB2Command response = WaitForCommand(request.MessageID);
+            if (response != null)
+            {
+                return response.Header.Status;
+            }
+            else
+            {
+                return NTStatus.STATUS_INVALID_SMB;
+            }
         }
 
         private void OnClientSocketReceive(IAsyncResult ar)
@@ -433,7 +470,7 @@ namespace SMBLibrary.Client
                     m_isConnected = false;
                     state.ReceiveBuffer.Dispose();
                 }
-                else
+                else if (clientSocket.Connected)
                 {
                     NBTConnectionReceiveBuffer buffer = state.ReceiveBuffer;
                     buffer.SetNumberOfBytesReceived(numberOfBytesReceived);
@@ -524,10 +561,10 @@ namespace SMBLibrary.Client
 
                 m_availableCredits += command.Header.Credits;
 
-                if (m_transport == SMBTransportType.DirectTCPTransport && command is NegotiateResponse)
+                if (m_transport == SMBTransportType.DirectTCPTransport && command is NegotiateResponse negotiateResponse)
                 {
-                    NegotiateResponse negotiateResponse = (NegotiateResponse)command;
-                    if ((negotiateResponse.Capabilities & Capabilities.LargeMTU) > 0)
+                    m_connectionSupportsMultiCredit = (negotiateResponse.Capabilities & Capabilities.LargeMTU) > 0;
+                    if (m_connectionSupportsMultiCredit)
                     {
                         // [MS-SMB2] 3.2.5.1 Receiving Any Message - If the message size received exceeds Connection.MaxTransactSize, the client SHOULD disconnect the connection.
                         // Note: Windows clients do not enforce the MaxTransactSize value.
@@ -548,6 +585,16 @@ namespace SMBLibrary.Client
                 // Otherwise, the response MUST be discarded as invalid.
                 if (command.Header.MessageID != 0xFFFFFFFFFFFFFFFF || command.Header.Command == SMB2CommandName.OplockBreak)
                 {
+                    bool isInterimResponse = ((command.Header.Flags & SMB2PacketHeaderFlags.AsyncCommand) != 0) && command.Header.Status == NTStatus.STATUS_PENDING;
+                    bool shouldBeSigned = m_isLoggedIn && m_signingRequired && !m_encryptSessionData && !isInterimResponse;
+
+                    // [MS-SMB2] 3.2.5.1.3 If signature verification fails, the client MUST discard the received message. The client MAY also choose to disconnect the connection
+                    if (shouldBeSigned && !SMB2Cryptography.VerifySignature(messageBytes, m_dialect, m_signingKey))
+                    {
+                        Log("Invalid SMB2 response signature");
+                        return;
+                    }
+
                     lock (m_incomingQueueLock)
                     {
                         m_incomingQueue.Add(command);
@@ -638,8 +685,14 @@ namespace SMBLibrary.Client
 
         internal void TrySendCommand(SMB2Command request, bool encryptData)
         {
-            if (m_dialect == SMB2Dialect.SMB202 || m_transport == SMBTransportType.NetBiosOverTCP)
+            if (!m_connectionSupportsMultiCredit && request.Header.CreditCharge > 1)
             {
+                throw new Exception("Attempted to read or write more data than allowed for this connection");
+            }
+
+            if (!m_connectionSupportsMultiCredit)
+            {
+                // [MS-SMB2] 3.2.4.1.5 If [..] Connection.SupportsMultiCredit is FALSE, CreditCharge SHOULD be set to 0.
                 request.Header.CreditCharge = 0;
                 request.Header.Credits = 1;
                 m_availableCredits -= 1;
@@ -648,6 +701,9 @@ namespace SMBLibrary.Client
             {
                 if (request.Header.CreditCharge == 0)
                 {
+                    // [MS-SMB2] 3.2.4.1.5 If Connection.SupportsMultiCredit is TRUE:
+                    // For READ, WRITE, IOCTL, and QUERY_DIRECTORY requests, CreditCharge field in the SMB2 header SHOULD be set to [..] the value computed.
+                    // For all other requests, the client MUST set CreditCharge to 1.
                     request.Header.CreditCharge = 1;
                 }
 
@@ -681,7 +737,7 @@ namespace SMBLibrary.Client
                 }
             }
             TrySendCommand(m_clientSocket, request, encryptData ? m_encryptionKey : null);
-            if (m_dialect == SMB2Dialect.SMB202 || m_transport == SMBTransportType.NetBiosOverTCP)
+            if (!m_connectionSupportsMultiCredit)
             {
                 m_messageID++;
             }

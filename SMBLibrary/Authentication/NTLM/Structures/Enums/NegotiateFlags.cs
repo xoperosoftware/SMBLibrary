@@ -7,7 +7,12 @@ namespace SMBLibrary.Authentication.NTLM
     {
         UnicodeEncoding = 0x00000001,         // NTLMSSP_NEGOTIATE_UNICODE
         OEMEncoding = 0x00000002,             // NTLM_NEGOTIATE_OEM
-        TargetNameSupplied = 0x00000004,      // NTLMSSP_REQUEST_TARGET
+
+        /// <summary>
+        /// If set in the Negotiate message, the server MUST supply target name.
+        /// Windows Server 2008 R2 will supply target name even if not requested.
+        /// </summary>
+        TargetNameNegotiated = 0x00000004,    // NTLMSSP_REQUEST_TARGET
         Sign = 0x00000010,                    // NTLMSSP_NEGOTIATE_SIGN
         Seal = 0x00000020,                    // NTLMSSP_NEGOTIATE_SEAL
         Datagram = 0x00000040,                // NTLMSSP_NEGOTIATE_DATAGRAM
@@ -37,7 +42,7 @@ namespace SMBLibrary.Authentication.NTLM
         /// </summary>
         ExtendedSessionSecurity = 0x00080000, // NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY
         Identify = 0x00100000,                // NTLMSSP_NEGOTIATE_IDENTIFY
-        RequestLMSessionKey = 0x00400000,     // NTLMSSP_REQUEST_NON_NT_SESSION_KEY
+        RequestNonNTSessionKey = 0x00400000,  // NTLMSSP_REQUEST_NON_NT_SESSION_KEY
         TargetInfo = 0x00800000,              // NTLMSSP_NEGOTIATE_TARGET_INFO
         Version = 0x02000000,                 // NTLMSSP_NEGOTIATE_VERSION
         Use128BitEncryption = 0x20000000,     // NTLMSSP_NEGOTIATE_128
