@@ -32,9 +32,15 @@ namespace SMBLibrary.SMB2
 
         public static bool VerifySignature(byte[] messageBytes, SMB2Dialect dialect, byte[] signingKey)
         {
+            return VerifySignature(messageBytes, messageBytes.Length, dialect, signingKey);
+        }
+
+        /// <param name="messageLength">The message's own length, for a pooled buffer longer than the message.</param>
+        public static bool VerifySignature(byte[] messageBytes, int messageLength, SMB2Dialect dialect, byte[] signingKey)
+        {
             byte[] signature = ByteReader.ReadBytes(messageBytes, SMB2Header.SignatureOffset, SMB2Header.SignatureLength);
             Array.Clear(messageBytes, SMB2Header.SignatureOffset, SMB2Header.SignatureLength);
-            byte[] expectedSignature = CalculateSignature(signingKey, dialect, messageBytes, 0, messageBytes.Length);
+            byte[] expectedSignature = CalculateSignature(signingKey, dialect, messageBytes, 0, messageLength);
             return ByteUtils.AreByteArraysEqual(signature, expectedSignature);
         }
 

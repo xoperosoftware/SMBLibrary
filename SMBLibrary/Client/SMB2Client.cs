@@ -505,9 +505,18 @@ namespace SMBLibrary.Client
             while (receiveBuffer.HasCompletePacket())
             {
                 SessionPacket packet = null;
+                PooledBuffer message = null;
                 try
                 {
-                    packet = receiveBuffer.DequeuePacket();
+                    // Session messages are taken into a pooled buffer
+                    if (receiveBuffer.PeekPacketType() == SessionPacketTypeName.SessionMessage)
+                    {
+                        message = receiveBuffer.DequeuePacketTrailer();
+                    }
+                    else
+                    {
+                        packet = receiveBuffer.DequeuePacket();
+                    }
                 }
                 catch (Exception)
                 {
@@ -517,90 +526,96 @@ namespace SMBLibrary.Client
                     break;
                 }
 
-                if (packet != null)
+                if (message != null)
+                {
+                    ProcessSessionMessage(message, state);
+                }
+                else if (packet != null)
                 {
                     ProcessPacket(packet, state);
                 }
             }
         }
 
-        private void ProcessPacket(SessionPacket packet, ConnectionState state)
+        /// <remarks>Takes ownership of message.</remarks>
+        private void ProcessSessionMessage(PooledBuffer message, ConnectionState state)
         {
-            if (packet is SessionMessagePacket)
+            SMB2Command command;
+            byte[] messageBytes;
+            int messageLength;
+            bool isSignatureValid;
+            try
             {
-                byte[] messageBytes;
-                if (m_dialect >= SMB2Dialect.SMB300 && SMB2TransformHeader.IsTransformHeader(packet.Trailer, 0))
+                if (m_dialect >= SMB2Dialect.SMB300 && SMB2TransformHeader.IsTransformHeader(message.Array, 0))
                 {
-                    SMB2TransformHeader transformHeader = new SMB2TransformHeader(packet.Trailer, 0);
-                    byte[] encryptedMessage = ByteReader.ReadBytes(packet.Trailer, SMB2TransformHeader.Length, (int)transformHeader.OriginalMessageSize);
+                    SMB2TransformHeader transformHeader = new SMB2TransformHeader(message.Array, 0);
+                    byte[] encryptedMessage = ByteReader.ReadBytes(message.Array, SMB2TransformHeader.Length, (int)transformHeader.OriginalMessageSize);
                     messageBytes = SMB2Cryptography.DecryptMessage(m_decryptionKey, transformHeader, encryptedMessage);
+                    messageLength = messageBytes.Length;
+                    message.Dispose();
+                    message = null;
+                    command = SMB2Command.ReadResponse(messageBytes, 0);
                 }
                 else
                 {
-                    messageBytes = packet.Trailer;
-                }
-
-                SMB2Command command;
-                try
-                {
-                    command = SMB2Command.ReadResponse(messageBytes, 0);
-                }
-                catch (Exception ex)
-                {
-                    Log("Invalid SMB2 response: " + ex.Message);
-                    state.ClientSocket.Close();
-                    m_isConnected = false;
-                    state.ReceiveBuffer.Dispose();
-                    return;
+                    messageBytes = message.Array;
+                    messageLength = message.Length;
+                    if (IsReadResponse(messageBytes))
+                    {
+                        command = new ReadResponse(message);
+                        message = null;
+                    }
+                    else
+                    {
+                        command = SMB2Command.ReadResponse(messageBytes, 0);
+                    }
                 }
 
                 if (m_preauthIntegrityHashValue != null && (command is NegotiateResponse || (command is SessionSetupResponse sessionSetupResponse && sessionSetupResponse.Header.Status == NTStatus.STATUS_MORE_PROCESSING_REQUIRED)))
                 {
-                    m_preauthIntegrityHashValue = SMB2Cryptography.ComputeHash(HashAlgorithm.SHA512, ByteUtils.Concatenate(m_preauthIntegrityHashValue, messageBytes));
+                    // A pooled array is longer than the message, so only the message's own bytes may be hashed.
+                    byte[] hashedBytes = messageLength == messageBytes.Length ? messageBytes : ByteReader.ReadBytes(messageBytes, 0, messageLength);
+                    m_preauthIntegrityHashValue = SMB2Cryptography.ComputeHash(HashAlgorithm.SHA512, ByteUtils.Concatenate(m_preauthIntegrityHashValue, hashedBytes));
                 }
 
-                m_availableCredits += command.Header.Credits;
-
-                if (m_transport == SMBTransportType.DirectTCPTransport && command is NegotiateResponse negotiateResponse)
+                // Verified here, while the message bytes are still ours: a pooled message goes back to the pool below.
+                bool isInterimResponse = ((command.Header.Flags & SMB2PacketHeaderFlags.AsyncCommand) != 0) && command.Header.Status == NTStatus.STATUS_PENDING;
+                bool shouldBeSigned = m_isLoggedIn && m_signingRequired && !m_encryptSessionData && !isInterimResponse;
+                isSignatureValid = !shouldBeSigned || SMB2Cryptography.VerifySignature(messageBytes, messageLength, m_dialect, m_signingKey);
+            }
+            catch (Exception ex)
+            {
+                Log("Invalid SMB2 response: " + ex.Message);
+                state.ClientSocket.Close();
+                m_isConnected = false;
+                state.ReceiveBuffer.Dispose();
+                return;
+            }
+            finally
+            {
+                if (message != null)
                 {
-                    m_connectionSupportsMultiCredit = (negotiateResponse.Capabilities & Capabilities.LargeMTU) > 0;
-                    if (m_connectionSupportsMultiCredit)
-                    {
-                        // [MS-SMB2] 3.2.5.1 Receiving Any Message - If the message size received exceeds Connection.MaxTransactSize, the client SHOULD disconnect the connection.
-                        // Note: Windows clients do not enforce the MaxTransactSize value.
-                        // We use a value that we have observed to work well with both Microsoft and non-Microsoft servers.
-                        // see https://github.com/TalAloni/SMBLibrary/issues/239
-                        int serverMaxTransactSize = (int)Math.Max(negotiateResponse.MaxTransactSize, negotiateResponse.MaxReadSize);
-                        int maxPacketSize = SessionPacket.HeaderLength + (int)Math.Min(serverMaxTransactSize, ClientMaxTransactSize) + 256;
-                        if (maxPacketSize > state.ReceiveBuffer.Buffer.Length)
-                        {
-                            state.ReceiveBuffer.IncreaseBufferSize(maxPacketSize);
-                        }
-                    }
+                    message.Dispose();
                 }
+            }
 
-                // [MS-SMB2] 3.2.5.1.2 - If the MessageId is 0xFFFFFFFFFFFFFFFF, this is not a reply to a previous request,
-                // and the client MUST NOT attempt to locate the request, but instead process it as follows:
-                // If the command field in the SMB2 header is SMB2 OPLOCK_BREAK, it MUST be processed as specified in 3.2.5.19.
-                // Otherwise, the response MUST be discarded as invalid.
-                if (command.Header.MessageID != 0xFFFFFFFFFFFFFFFF || command.Header.Command == SMB2CommandName.OplockBreak)
-                {
-                    bool isInterimResponse = ((command.Header.Flags & SMB2PacketHeaderFlags.AsyncCommand) != 0) && command.Header.Status == NTStatus.STATUS_PENDING;
-                    bool shouldBeSigned = m_isLoggedIn && m_signingRequired && !m_encryptSessionData && !isInterimResponse;
+            ProcessResponse(command, isSignatureValid, state);
+        }
 
-                    // [MS-SMB2] 3.2.5.1.3 If signature verification fails, the client MUST discard the received message. The client MAY also choose to disconnect the connection
-                    if (shouldBeSigned && !SMB2Cryptography.VerifySignature(messageBytes, m_dialect, m_signingKey))
-                    {
-                        Log("Invalid SMB2 response signature");
-                        return;
-                    }
+        private static bool IsReadResponse(byte[] messageBytes)
+        {
+            SMB2CommandName commandName = (SMB2CommandName)LittleEndianConverter.ToUInt16(messageBytes, 12);
+            ushort structureSize = LittleEndianConverter.ToUInt16(messageBytes, SMB2Header.Length + 0);
+            return commandName == SMB2CommandName.Read && structureSize == ReadResponse.DeclaredSize;
+        }
 
-                    lock (m_incomingQueueLock)
-                    {
-                        m_incomingQueue.Add(command);
-                        m_incomingQueueEventHandle.Set();
-                    }
-                }
+        private void ProcessPacket(SessionPacket packet, ConnectionState state)
+        {
+            if (packet is SessionMessagePacket)
+            {
+                PooledBuffer message = PooledBuffer.Rent(packet.Trailer.Length);
+                Array.Copy(packet.Trailer, message.Array, packet.Trailer.Length);
+                ProcessSessionMessage(message, state);
             }
             else if ((packet is PositiveSessionResponsePacket || packet is NegativeSessionResponsePacket) && m_transport == SMBTransportType.NetBiosOverTCP)
             {
@@ -616,6 +631,62 @@ namespace SMBLibrary.Client
                 Log("Inappropriate NetBIOS session packet");
                 state.ClientSocket.Close();
                 state.ReceiveBuffer.Dispose();
+            }
+        }
+
+        private void ProcessResponse(SMB2Command command, bool isSignatureValid, ConnectionState state)
+        {
+            m_availableCredits += command.Header.Credits;
+
+            if (m_transport == SMBTransportType.DirectTCPTransport && command is NegotiateResponse negotiateResponse)
+            {
+                m_connectionSupportsMultiCredit = (negotiateResponse.Capabilities & Capabilities.LargeMTU) > 0;
+                if (m_connectionSupportsMultiCredit)
+                {
+                    // [MS-SMB2] 3.2.5.1 Receiving Any Message - If the message size received exceeds Connection.MaxTransactSize, the client SHOULD disconnect the connection.
+                    // Note: Windows clients do not enforce the MaxTransactSize value.
+                    // We use a value that we have observed to work well with both Microsoft and non-Microsoft servers.
+                    // see https://github.com/TalAloni/SMBLibrary/issues/239
+                    int serverMaxTransactSize = (int)Math.Max(negotiateResponse.MaxTransactSize, negotiateResponse.MaxReadSize);
+                    int maxPacketSize = SessionPacket.HeaderLength + (int)Math.Min(serverMaxTransactSize, ClientMaxTransactSize) + 256;
+                    if (maxPacketSize > state.ReceiveBuffer.Buffer.Length)
+                    {
+                        state.ReceiveBuffer.IncreaseBufferSize(maxPacketSize);
+                    }
+                }
+            }
+
+            // [MS-SMB2] 3.2.5.1.2 - If the MessageId is 0xFFFFFFFFFFFFFFFF, this is not a reply to a previous request,
+            // and the client MUST NOT attempt to locate the request, but instead process it as follows:
+            // If the command field in the SMB2 header is SMB2 OPLOCK_BREAK, it MUST be processed as specified in 3.2.5.19.
+            // Otherwise, the response MUST be discarded as invalid.
+            if (command.Header.MessageID != 0xFFFFFFFFFFFFFFFF || command.Header.Command == SMB2CommandName.OplockBreak)
+            {
+                // [MS-SMB2] 3.2.5.1.3 If signature verification fails, the client MUST discard the received message. The client MAY also choose to disconnect the connection
+                if (!isSignatureValid)
+                {
+                    Log("Invalid SMB2 response signature");
+                    ReleaseData(command);
+                    return;
+                }
+
+                lock (m_incomingQueueLock)
+                {
+                    m_incomingQueue.Add(command);
+                    m_incomingQueueEventHandle.Set();
+                }
+            }
+            else
+            {
+                ReleaseData(command);
+            }
+        }
+
+        private static void ReleaseData(SMB2Command command)
+        {
+            if (command is ReadResponse readResponse)
+            {
+                readResponse.ReleaseData();
             }
         }
 
@@ -730,10 +801,6 @@ namespace SMBLibrary.Client
                 if (request.Header.IsSigned)
                 {
                     request.Header.Signature = new byte[16]; // Request could be reused
-                    byte[] buffer = request.GetBytes();
-                    byte[] signature = SMB2Cryptography.CalculateSignature(m_signingKey, m_dialect, buffer, 0, buffer.Length);
-                    // [MS-SMB2] The first 16 bytes of the hash MUST be copied into the 16-byte signature field of the SMB2 Header.
-                    request.Header.Signature = ByteReader.ReadBytes(signature, 0, 16);
                 }
             }
             TrySendCommand(m_clientSocket, request, encryptData ? m_encryptionKey : null);
@@ -807,29 +874,59 @@ namespace SMBLibrary.Client
 
         private void TrySendCommand(Socket socket, SMB2Command request, byte[] encryptionKey)
         {
-            SessionMessagePacket packet = new SessionMessagePacket();
             if (encryptionKey != null)
             {
+                SessionMessagePacket packet = new SessionMessagePacket();
                 byte[] requestBytes = request.GetBytes();
                 packet.Trailer = SMB2Cryptography.TransformMessage(encryptionKey, requestBytes, request.Header.SessionID);
+                TrySendPacket(socket, packet);
+                return;
             }
-            else
+
+            // The whole packet is built in one pooled buffer: GetBytes would allocate the request and then the packet anew per send.
+            int requestLength = request.Length;
+            int packetLength = SessionPacket.HeaderLength + requestLength;
+            using (PooledBuffer packetBuffer = PooledBuffer.Rent(packetLength))
             {
-                packet.Trailer = request.GetBytes();
+                byte[] buffer = packetBuffer.Array;
+                // Serialization skips some bytes (e.g. an unsigned header's signature) and expects them zero; the write data is the only part overwritten in full.
+                int dataCount = request is WriteRequest writeRequest ? writeRequest.DataCount : 0;
+                Array.Clear(buffer, 0, packetLength - dataCount);
+
+                ByteWriter.WriteByte(buffer, 0, (byte)SessionPacketTypeName.SessionMessage);
+                ByteWriter.WriteByte(buffer, 1, Convert.ToByte(requestLength >> 16));
+                BigEndianWriter.WriteUInt16(buffer, 2, (ushort)(requestLength & 0xFFFF));
+                request.WriteBytes(buffer, SessionPacket.HeaderLength);
+
+                if (request.Header.IsSigned)
+                {
+                    byte[] signature = SMB2Cryptography.CalculateSignature(m_signingKey, m_dialect, buffer, SessionPacket.HeaderLength, requestLength);
+                    // [MS-SMB2] The first 16 bytes of the hash MUST be copied into the 16-byte signature field of the SMB2 Header.
+                    request.Header.Signature = ByteReader.ReadBytes(signature, 0, 16);
+                    ByteWriter.WriteBytes(buffer, SessionPacket.HeaderLength + SMB2Header.SignatureOffset, request.Header.Signature);
+                }
+
                 if (m_preauthIntegrityHashValue != null && (request is NegotiateRequest || request is SessionSetupRequest))
                 {
-                    m_preauthIntegrityHashValue = SMB2Cryptography.ComputeHash(HashAlgorithm.SHA512, ByteUtils.Concatenate(m_preauthIntegrityHashValue, packet.Trailer));
+                    byte[] requestBytes = ByteReader.ReadBytes(buffer, SessionPacket.HeaderLength, requestLength);
+                    m_preauthIntegrityHashValue = SMB2Cryptography.ComputeHash(HashAlgorithm.SHA512, ByteUtils.Concatenate(m_preauthIntegrityHashValue, requestBytes));
                 }
+
+                TrySendBytes(socket, buffer, packetLength);
             }
-            TrySendPacket(socket, packet);
         }
 
         private void TrySendPacket(Socket socket, SessionPacket packet)
         {
+            byte[] packetBytes = packet.GetBytes();
+            TrySendBytes(socket, packetBytes, packetBytes.Length);
+        }
+
+        private void TrySendBytes(Socket socket, byte[] buffer, int length)
+        {
             try
             {
-                byte[] packetBytes = packet.GetBytes();
-                socket.Send(packetBytes);
+                socket.Send(buffer, 0, length, SocketFlags.None);
             }
             catch (SocketException)
             {
