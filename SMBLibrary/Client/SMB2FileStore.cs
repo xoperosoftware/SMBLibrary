@@ -82,9 +82,63 @@ namespace SMBLibrary.Client
             SMB2Command response = m_client.WaitForCommand(request.MessageID, out bool connectionTerminated);
             if (response != null)
             {
-                if (response.Header.Status == NTStatus.STATUS_SUCCESS && response is ReadResponse)
+                if (response is ReadResponse readResponse)
                 {
-                    data = ((ReadResponse)response).Data;
+                    readResponse.MaterializeData();
+                    if (response.Header.Status == NTStatus.STATUS_SUCCESS)
+                    {
+                        data = readResponse.Data;
+                    }
+                }
+                return response.Header.Status;
+            }
+
+            return connectionTerminated ? NTStatus.STATUS_INVALID_SMB : NTStatus.STATUS_IO_TIMEOUT;
+        }
+
+        /// <summary>
+        /// Reads up to count bytes from the file straight into destination, without allocating a buffer per read.
+        /// </summary>
+        public NTStatus ReadFile(object handle, long offset, byte[] destination, int destinationOffset, int count, out int bytesRead)
+        {
+            if (destination == null)
+            {
+                throw new ArgumentNullException(nameof(destination));
+            }
+            if (destinationOffset < 0 || count < 0 || destinationOffset > destination.Length - count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(count));
+            }
+
+            bytesRead = 0;
+            ReadRequest request = new ReadRequest();
+            request.Header.CreditCharge = (ushort)Math.Ceiling((double)count / BytesPerCredit);
+            request.FileId = (FileID)handle;
+            request.Offset = (ulong)offset;
+            request.ReadLength = (uint)count;
+
+            TrySendCommand(request);
+            SMB2Command response = m_client.WaitForCommand(request.MessageID, out bool connectionTerminated);
+            if (response != null)
+            {
+                if (response is ReadResponse readResponse)
+                {
+                    try
+                    {
+                        if (response.Header.Status == NTStatus.STATUS_SUCCESS)
+                        {
+                            if (readResponse.DataCount > count)
+                            {
+                                throw new System.IO.InvalidDataException("READ response returned more data than requested");
+                            }
+                            readResponse.CopyData(destination, destinationOffset);
+                            bytesRead = readResponse.DataCount;
+                        }
+                    }
+                    finally
+                    {
+                        readResponse.ReleaseData();
+                    }
                 }
                 return response.Header.Status;
             }
@@ -94,12 +148,29 @@ namespace SMBLibrary.Client
 
         public NTStatus WriteFile(out int numberOfBytesWritten, object handle, long offset, byte[] data)
         {
+            return WriteFile(out numberOfBytesWritten, handle, offset, data, 0, data.Length);
+        }
+
+        /// <summary>
+        /// Writes count bytes of buffer to the file without copying them into a buffer of the request's own.
+        /// </summary>
+        public NTStatus WriteFile(out int numberOfBytesWritten, object handle, long offset, byte[] buffer, int bufferOffset, int count)
+        {
+            if (buffer == null)
+            {
+                throw new ArgumentNullException(nameof(buffer));
+            }
+            if (bufferOffset < 0 || count < 0 || bufferOffset > buffer.Length - count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(count));
+            }
+
             numberOfBytesWritten = 0;
             WriteRequest request = new WriteRequest();
-            request.Header.CreditCharge = (ushort)Math.Ceiling((double)data.Length / BytesPerCredit);
+            request.Header.CreditCharge = (ushort)Math.Ceiling((double)count / BytesPerCredit);
             request.FileId = (FileID)handle;
             request.Offset = (ulong)offset;
-            request.Data = data;
+            request.SetData(buffer, bufferOffset, count);
 
             TrySendCommand(request);
             SMB2Command response = m_client.WaitForCommand(request.MessageID, out bool connectionTerminated);

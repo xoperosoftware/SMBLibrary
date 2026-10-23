@@ -31,6 +31,11 @@ namespace SMBLibrary.SMB2
         public byte[] Data = new byte[0];
         public byte[] WriteChannelInfo = new byte[0];
 
+        // When set, written in place of Data, so a caller's buffer is sent without first being copied into one of its own.
+        private byte[] m_dataBuffer;
+        private int m_dataBufferOffset;
+        private int m_dataBufferCount;
+
         public WriteRequest() : base(SMB2CommandName.Write)
         {
             StructureSize = DeclaredSize;
@@ -63,8 +68,8 @@ namespace SMBLibrary.SMB2
                 WriteChannelInfoOffset = SMB2Header.Length + FixedSize;
             }
             DataOffset = 0;
-            DataLength = (uint)Data.Length;
-            if (Data.Length > 0)
+            DataLength = (uint)DataCount;
+            if (DataCount > 0)
             {
                 DataOffset = (ushort)(SMB2Header.Length + FixedSize + WriteChannelInfo.Length);
             }
@@ -82,9 +87,28 @@ namespace SMBLibrary.SMB2
             {
                 ByteWriter.WriteBytes(buffer, offset + FixedSize, WriteChannelInfo);
             }
-            if (Data.Length > 0)
+            if (m_dataBuffer != null)
+            {
+                Array.Copy(m_dataBuffer, m_dataBufferOffset, buffer, offset + FixedSize + WriteChannelInfo.Length, m_dataBufferCount);
+            }
+            else if (Data.Length > 0)
             {
                 ByteWriter.WriteBytes(buffer, offset + FixedSize + WriteChannelInfo.Length, Data);
+            }
+        }
+
+        internal void SetData(byte[] buffer, int offset, int count)
+        {
+            m_dataBuffer = buffer;
+            m_dataBufferOffset = offset;
+            m_dataBufferCount = count;
+        }
+
+        internal int DataCount
+        {
+            get
+            {
+                return m_dataBuffer != null ? m_dataBufferCount : Data.Length;
             }
         }
 
@@ -92,7 +116,7 @@ namespace SMBLibrary.SMB2
         {
             get
             {
-                return FixedSize + Data.Length + WriteChannelInfo.Length;
+                return FixedSize + DataCount + WriteChannelInfo.Length;
             }
         }
     }

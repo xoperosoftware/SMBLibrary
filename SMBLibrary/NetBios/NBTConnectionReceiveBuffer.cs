@@ -99,6 +99,34 @@ namespace SMBLibrary.NetBios
         }
 
         /// <summary>
+        /// HasCompletePacket must be called and return true before calling PeekPacketType
+        /// </summary>
+        internal SessionPacketTypeName PeekPacketType()
+        {
+            return (SessionPacketTypeName)m_buffer[m_readOffset];
+        }
+
+        /// <summary>
+        /// HasCompletePacket must be called and return true before calling DequeuePacketTrailer
+        /// </summary>
+        internal PooledBuffer DequeuePacketTrailer()
+        {
+            int trailerLength = m_packetLength.Value - SessionPacket.HeaderLength;
+            PooledBuffer trailer = PooledBuffer.Rent(trailerLength);
+            try
+            {
+                Array.Copy(m_buffer, m_readOffset + SessionPacket.HeaderLength, trailer.Array, 0, trailerLength);
+            }
+            catch
+            {
+                trailer.Dispose();
+                throw;
+            }
+            RemovePacketBytes();
+            return trailer;
+        }
+
+        /// <summary>
         /// HasCompletePDU must be called and return true before calling DequeuePDUBytes
         /// </summary>
         public byte[] DequeuePacketBytes()
