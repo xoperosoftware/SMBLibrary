@@ -45,7 +45,7 @@ namespace SMBLibrary.Client
         private SessionPacket m_sessionResponsePacket;
         private EventWaitHandle m_sessionResponseEventHandle = new EventWaitHandle(false, EventResetMode.AutoReset);
 
-        private object m_sendlock = new object();
+        private object m_sendLock = new object();
 
         private uint m_messageID = 0;
         private SMB2Dialect m_dialect;
