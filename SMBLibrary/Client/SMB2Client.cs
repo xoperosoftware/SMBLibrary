@@ -29,7 +29,6 @@ namespace SMBLibrary.Client
         public static readonly int DefaultResponseTimeoutInMilliseconds = 5000;
 
         private readonly ILogger _logger;
-        
         private string m_serverName;
         private SMBTransportType m_transport;
         private bool m_isConnected;
@@ -45,6 +44,8 @@ namespace SMBLibrary.Client
 
         private SessionPacket m_sessionResponsePacket;
         private EventWaitHandle m_sessionResponseEventHandle = new EventWaitHandle(false, EventResetMode.AutoReset);
+
+        private object m_sendLock = new object();
 
         private uint m_messageID = 0;
         private SMB2Dialect m_dialect;
@@ -300,7 +301,6 @@ namespace SMBLibrary.Client
                 _logger.LogError("Login error: returned response is null");
                 return NTStatus.STATUS_INVALID_SMB;
             }
-            
             if (response is ErrorResponse)
             {
                 return response.Header.Status;
@@ -333,7 +333,7 @@ namespace SMBLibrary.Client
                 }
                 return response.Header.Status;
             }
-            else if(response.Header.Status == NTStatus.STATUS_LOGON_FAILURE)
+            else if (response.Header.Status == NTStatus.STATUS_LOGON_FAILURE)
             {
                 return NTStatus.STATUS_LOGON_FAILURE;
             }
@@ -720,30 +720,33 @@ namespace SMBLibrary.Client
                 }
             }
 
-            request.Header.MessageID = m_messageID;
-            request.Header.SessionID = m_sessionID;
-            // [MS-SMB2] If the client encrypts the message [..] then the client MUST set the Signature field of the SMB2 header to zero
-            if (m_signingRequired && !encryptData)
+            lock (m_sendLock)
             {
-                request.Header.IsSigned = (m_sessionID != 0 && ((request.CommandName == SMB2CommandName.TreeConnect || request.Header.TreeID != 0) ||
-                                                                (m_dialect >= SMB2Dialect.SMB300 && request.CommandName == SMB2CommandName.Logoff)));
-                if (request.Header.IsSigned)
+                request.Header.MessageID = m_messageID;
+                request.Header.SessionID = m_sessionID;
+                // [MS-SMB2] If the client encrypts the message [..] then the client MUST set the Signature field of the SMB2 header to zero
+                if (m_signingRequired && !encryptData)
                 {
-                    request.Header.Signature = new byte[16]; // Request could be reused
-                    byte[] buffer = request.GetBytes();
-                    byte[] signature = SMB2Cryptography.CalculateSignature(m_signingKey, m_dialect, buffer, 0, buffer.Length);
-                    // [MS-SMB2] The first 16 bytes of the hash MUST be copied into the 16-byte signature field of the SMB2 Header.
-                    request.Header.Signature = ByteReader.ReadBytes(signature, 0, 16);
+                    request.Header.IsSigned = (m_sessionID != 0 && ((request.CommandName == SMB2CommandName.TreeConnect || request.Header.TreeID != 0) ||
+                                                                    (m_dialect >= SMB2Dialect.SMB300 && request.CommandName == SMB2CommandName.Logoff)));
+                    if (request.Header.IsSigned)
+                    {
+                        request.Header.Signature = new byte[16]; // Request could be reused
+                        byte[] buffer = request.GetBytes();
+                        byte[] signature = SMB2Cryptography.CalculateSignature(m_signingKey, m_dialect, buffer, 0, buffer.Length);
+                        // [MS-SMB2] The first 16 bytes of the hash MUST be copied into the 16-byte signature field of the SMB2 Header.
+                        request.Header.Signature = ByteReader.ReadBytes(signature, 0, 16);
+                    }
                 }
-            }
-            TrySendCommand(m_clientSocket, request, encryptData ? m_encryptionKey : null);
-            if (!m_connectionSupportsMultiCredit)
-            {
-                m_messageID++;
-            }
-            else
-            {
-                m_messageID += request.Header.CreditCharge;
+                TrySendCommand(m_clientSocket, request, encryptData ? m_encryptionKey : null);
+                if (!m_connectionSupportsMultiCredit)
+                {
+                    m_messageID++;
+                }
+                else
+                {
+                    m_messageID += request.Header.CreditCharge;
+                }
             }
         }
 
